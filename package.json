@@ -1,0 +1,24 @@
+{
+    "name": "youtick-core",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Public Good Core Repo for YouTick - Decentralized Media Framework on NEAR",
+    "workspaces": [
+        "apps/*",
+        "packages/*"
+    ],
+    "scripts": {
+        "build": "npm run build --workspaces",
+        "dev": "npm run dev --workspace=apps/minimal",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "keywords": [
+        "near",
+        "lit-protocol",
+        "mpc",
+        "chain-signatures",
+        "public-good"
+    ],
+    "author": "4rmus",
+    "license": "MIT"
+}
