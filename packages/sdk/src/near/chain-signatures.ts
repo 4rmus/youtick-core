@@ -5,14 +5,17 @@ import BN from 'bn.js';
 import { sha3_256 } from 'js-sha3';
 import { YouTickConfig, DEFAULT_CONFIG } from '../config';
 
-const MPC_CONTRACT = 'v1.signer-prod.testnet';
+// Defaults
+const DEFAULT_MPC_CONTRACT = 'v1.signer-prod.testnet';
+const DEFAULT_DERIVATION_PATH = 'youtick,1';
 
 export async function deriveEthAddress(
     accountId: string,
-    path: string,
+    path: string = DEFAULT_DERIVATION_PATH,
     config: YouTickConfig = DEFAULT_CONFIG
 ): Promise<string> {
-    const cacheKey = `mpc_address_v8_${accountId}_${path}`;
+    const mpcContract = config.mpcContractId || DEFAULT_MPC_CONTRACT;
+    const cacheKey = `mpc_address_v8_${accountId}_${path}_${mpcContract}`;
 
     // Simple in-memory cache check if window exists (browser)
     if (typeof window !== 'undefined') {
@@ -29,7 +32,7 @@ export async function deriveEthAddress(
     try {
         const result = await provider.query({
             request_type: "call_function",
-            account_id: MPC_CONTRACT,
+            account_id: mpcContract,
             method_name: "public_key",
             args_base64: Buffer.from("{}").toString("base64"),
             finality: "final"
@@ -39,17 +42,21 @@ export async function deriveEthAddress(
         const rawString = String.fromCharCode(...keyBytes);
         masterKey = JSON.parse(rawString);
     } catch (e) {
-        console.error("Failed to fetch MPC master key:", e);
+        console.error("Failed to fetch MPC master key, falling back to known testnet key:", e);
+        // Fallback for v1.signer-prod.testnet only useful for dev/test
         masterKey = "secp256k1:4HFcTSodRLVCGNVreQW2nRoAT1g8jU6db747155tYf49P7c5t578D5588C889988";
     }
 
     // 2. Derive Child Public Key
     // accountId is the Caller of the sign function.
     // When using a proxy contract, it is the contract ID.
-    const effectiveCallerId = config.contractId;
-    const compositePath = `${effectiveCallerId}/${path}`;
+    // However, for typical User->MPC usage, the accountId is the user.
+    // The "derivation path" can be a string like "lit/pkp-minting".
+    // The MPC contract derives: child = f(master, caller_id, path)
 
-    const derivedKey = deriveChildKey(masterKey, effectiveCallerId, compositePath);
+    // NOTE: This logic mimics the "near-mpc-recovery" derivation.
+    // If the contract behavior changes, this needs update.
+    const derivedKey = deriveChildKey(masterKey, accountId, path);
 
     // 3. Convert to Ethereum Address
     const derivedPoint = derivedKey.replace(/^secp256k1:/, '');
@@ -73,6 +80,8 @@ function deriveChildKey(masterKeyStr: string, accountId: string, path: string): 
     }
 
     const masterPoint = ec.keyFromPublic(masterKeyHex, 'hex').getPublic();
+
+    // Use the exact derivation prefix used by the MPC contract
     const derivation_path = `near-mpc-recovery v0.1.0 epsilon derivation:${accountId},${path}`;
     const scalarHex = sha3_256(derivation_path);
 
@@ -83,46 +92,8 @@ function deriveChildKey(masterKeyStr: string, accountId: string, path: string): 
     return derivedPoint.encode('hex', false);
 }
 
-export async function signWithMPC(
-    wallet: any,
-    accountId: string,
-    path: string,
-    message: string,
-    config?: YouTickConfig
-): Promise<any> {
-    const messageHash = ethers.hashMessage(message);
-    const payload = Array.from(ethers.getBytes(messageHash));
-
-    const args = {
-        request: {
-            payload,
-            path,
-            key_version: 0
-        }
-    };
-
-    const functionCallAction = transactions.functionCall(
-        'sign',
-        Buffer.from(JSON.stringify(args)),
-        new BN('300000000000000'), // 300 TGas
-        new BN('100000000000000000000000') // 0.1 NEAR
-    );
-
-    const result = await wallet.signAndSendTransaction({
-        receiverId: MPC_CONTRACT,
-        actions: [functionCallAction as any]
-    });
-
-    const successValue = result.status.SuccessValue;
-    if (!successValue) {
-        throw new Error('Failed to get signature from transaction result');
-    }
-
-    return JSON.parse(Buffer.from(successValue, 'base64').toString());
-}
-
 export class MPCSigner extends ethers.AbstractSigner {
-    private wallet: any;
+    private wallet: any; // Using generic wallet interface
     private nearAccountId: string;
     private derivationPath: string;
     private _address: string | null = null;
@@ -131,7 +102,7 @@ export class MPCSigner extends ethers.AbstractSigner {
     constructor(
         wallet: any,
         nearAccountId: string,
-        derivationPath: string = 'lit/pkp-minting',
+        derivationPath: string = DEFAULT_DERIVATION_PATH,
         provider?: ethers.Provider,
         config: YouTickConfig = DEFAULT_CONFIG
     ) {
@@ -144,13 +115,23 @@ export class MPCSigner extends ethers.AbstractSigner {
 
     async getAddress(): Promise<string> {
         if (!this._address) {
-            this._address = await deriveEthAddress(this.nearAccountId, this.derivationPath, this.config);
+            this._address = await deriveEthAddress(
+                this.nearAccountId,
+                this.derivationPath,
+                this.config
+            );
         }
         return this._address;
     }
 
     connect(provider: ethers.Provider): MPCSigner {
-        return new MPCSigner(this.wallet, this.nearAccountId, this.derivationPath, provider, this.config);
+        return new MPCSigner(
+            this.wallet,
+            this.nearAccountId,
+            this.derivationPath,
+            provider,
+            this.config
+        );
     }
 
     async signTransaction(tx: ethers.TransactionRequest): Promise<string> {
@@ -162,40 +143,10 @@ export class MPCSigner extends ethers.AbstractSigner {
         } as any);
 
         const txHash = unsignedTx.unsignedHash;
-        const payload = Array.from(ethers.getBytes(txHash));
-
-        const args = {
-            request: {
-                payload,
-                path: this.derivationPath,
-                key_version: 0
-            }
-        };
-
-        const functionCallAction = transactions.functionCall(
-            'sign',
-            Buffer.from(JSON.stringify(args)),
-            new BN('300000000000000'), // 300 TGas
-            new BN('100000000000000000000000') // 0.1 NEAR
-        );
-
-        const result = await this.wallet.signAndSendTransaction({
-            receiverId: MPC_CONTRACT,
-            actions: [functionCallAction as any]
-        });
-
-        const successValue = result.status.SuccessValue;
-        if (!successValue) {
-            throw new Error('MPC signing failed');
-        }
-
-        const mpcSig = JSON.parse(Buffer.from(successValue, 'base64').toString());
-        const r = '0x' + mpcSig.big_r.affine_point.substring(2, 66);
-        const s = '0x' + mpcSig.s.scalar;
-        const v = mpcSig.recovery_id + 27;
+        const signature = await this.requestSignature(txHash);
 
         const signedTx = unsignedTx.clone();
-        signedTx.signature = ethers.Signature.from({ r, s, v });
+        signedTx.signature = signature;
 
         return signedTx.serialized;
     }
@@ -205,39 +156,9 @@ export class MPCSigner extends ethers.AbstractSigner {
             ? ethers.toUtf8Bytes(message)
             : message;
         const messageHash = ethers.hashMessage(msgBytes);
-        const payload = Array.from(ethers.getBytes(messageHash));
 
-        const args = {
-            request: {
-                payload,
-                path: this.derivationPath,
-                key_version: 0
-            }
-        };
-
-        const functionCallAction = transactions.functionCall(
-            'sign',
-            Buffer.from(JSON.stringify(args)),
-            new BN('300000000000000'), // 300 TGas
-            new BN('100000000000000000000000') // 0.1 NEAR
-        );
-
-        const result = await this.wallet.signAndSendTransaction({
-            receiverId: MPC_CONTRACT,
-            actions: [functionCallAction as any]
-        });
-
-        const successValue = result.status.SuccessValue;
-        if (!successValue) {
-            throw new Error('MPC message signing failed');
-        }
-
-        const mpcSig = JSON.parse(Buffer.from(successValue, 'base64').toString());
-        const r = '0x' + mpcSig.big_r.affine_point.substring(2, 66);
-        const s = '0x' + mpcSig.s.scalar;
-        const v = mpcSig.recovery_id + 27;
-
-        return ethers.Signature.from({ r, s, v }).serialized;
+        const signature = await this.requestSignature(messageHash);
+        return signature.serialized;
     }
 
     async signTypedData(
@@ -246,7 +167,16 @@ export class MPCSigner extends ethers.AbstractSigner {
         value: Record<string, any>
     ): Promise<string> {
         const hash = ethers.TypedDataEncoder.hash(domain, types, value);
-        const payload = Array.from(ethers.getBytes(hash));
+        const signature = await this.requestSignature(hash);
+        return signature.serialized;
+    }
+
+    /**
+     * Core method to request signature from NEAR MPC Contract
+     */
+    private async requestSignature(payloadHash: string | Uint8Array): Promise<ethers.Signature> {
+        const payload = Array.from(ethers.getBytes(payloadHash));
+        const mpcContract = this.config.mpcContractId || DEFAULT_MPC_CONTRACT;
 
         const args = {
             request: {
@@ -259,25 +189,42 @@ export class MPCSigner extends ethers.AbstractSigner {
         const functionCallAction = transactions.functionCall(
             'sign',
             Buffer.from(JSON.stringify(args)),
-            new BN('300000000000000'), // 300 TGas
-            new BN('100000000000000000000000') // 0.1 NEAR
+            new BN('300000000000000'), // 300 TGas - MPC ops are expensive
+            new BN('50000000000000000000000') // 0.05 NEAR deposit (usually refunded)
         );
 
         const result = await this.wallet.signAndSendTransaction({
-            receiverId: MPC_CONTRACT,
-            actions: [functionCallAction as any]
+            receiverId: mpcContract,
+            actions: [functionCallAction]
         });
 
-        const successValue = result.status.SuccessValue;
+        // Parse success value
+        let successValue: string | undefined;
+
+        // Handle different wallet return shapes
+        if (result && result.status && 'SuccessValue' in result.status) {
+            successValue = result.status.SuccessValue;
+        } else if (typeof result === 'object') {
+            // Some wallets return the final execution outcome directly or differently
+            // Optimization: Try to find 'SuccessValue' in nested strcutures or simplified result
+            // For now assume standard structure or throw
+            if (result.status && result.status.SuccessValue) {
+                successValue = result.status.SuccessValue;
+            }
+        }
+
         if (!successValue) {
-            throw new Error('MPC typed data signing failed');
+            // Fallback: Sometimes we might just get the boolean or undefined if using certain selectors
+            // But for MPC we NEED the return value (the signature).
+            throw new Error('Failed to get signature from NEAR transaction result. Ensure the transaction succeeded and returned a value.');
         }
 
         const mpcSig = JSON.parse(Buffer.from(successValue, 'base64').toString());
+
         const r = '0x' + mpcSig.big_r.affine_point.substring(2, 66);
         const s = '0x' + mpcSig.s.scalar;
         const v = mpcSig.recovery_id + 27;
 
-        return ethers.Signature.from({ r, s, v }).serialized;
+        return ethers.Signature.from({ r, s, v });
     }
 }

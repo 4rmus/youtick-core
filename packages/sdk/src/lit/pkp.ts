@@ -2,7 +2,7 @@ import { LitNodeClient } from "@lit-protocol/lit-node-client";
 import { LitAbility } from "@lit-protocol/constants";
 import { LitPKPResource } from "@lit-protocol/auth-helpers";
 import { NEAR_AUTH_LIT_ACTION_CODE } from './actions/near-auth';
-
+import { PKPMintResult, SessionSigs } from '../types';
 
 export class PKPManager {
     private litNodeClient: LitNodeClient;
@@ -16,20 +16,19 @@ export class PKPManager {
      * Uses Lit Relay Server for gas-free minting.
      */
     async mintPKPWithNear(
-        nearAccountId: string,
-        nearPublicKey: string,
-        signature: string,
-        message: string,
-        signer?: any,
+        nearAccountId: string, // Kept for logging/context
+        nearPublicKey: string, // Unused in direct logic but kept for interface stability
+        signature: string, // Deprecated in direct implementation 
+        message: string,  // Deprecated usage
+        signer?: any,     // Ethers Signer (should be Typed)
         relayApiKey?: string,
-        useMock: boolean = true
-    ) {
+        useMock: boolean = false
+    ): Promise<PKPMintResult> {
         console.log(`Minting PKP for NEAR Account: ${nearAccountId}`);
 
-        if (useMock || !signer) {
-            console.log("Using mock minting (no relay key or signer provided)");
-            // Simulate delay
-            await new Promise(resolve => setTimeout(resolve, 2000));
+        if (useMock) {
+            console.warn("Using mock minting - DO NOT USE IN PRODUCTION");
+            await new Promise(resolve => setTimeout(resolve, 1000));
             return {
                 tokenId: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
                 publicKey: "0x0430591451f28b3687eec82601962383842d05713437299a4e216db8a2b5368a5c4cc31d87ee96c5685718df2894b5f884a44b937080b0bb183e2da025686008ab",
@@ -38,8 +37,12 @@ export class PKPManager {
             };
         }
 
+        if (!signer) {
+            throw new Error("Signer needed for minting");
+        }
+
         try {
-            // Dynamic import to avoid bundling issues if not needed
+            // Dynamic import to avoid bundling issues
             const { EthWalletProvider, LitRelay } = await import('@lit-protocol/lit-auth-client');
             const { LitNetwork } = await import('@lit-protocol/constants');
 
@@ -49,11 +52,12 @@ export class PKPManager {
             });
 
             if (!relayApiKey) {
-                throw new Error("Relay API Key is required for real minting");
+                console.warn("No Relay API Key provided. Minting might fail if wallet has no gas on Lit chain.");
+                // We proceed, user/dev might handle gas differently or use self-funded relay
             }
 
             const relay = new LitRelay({
-                relayApiKey,
+                relayApiKey: relayApiKey || 'api_key_placeholder', // Fallback
                 relayUrl: LitRelay.getRelayUrl(LitNetwork.DatilTest),
             });
 
@@ -69,8 +73,8 @@ export class PKPManager {
                 nearImplicitAccount: nearAccountId
             };
         } catch (e: any) {
-            console.error("Real minting failed:", e);
-            throw e;
+            console.error("PKP Minting failed:", e);
+            throw new Error(`Failed to mint PKP: ${e.message}`);
         }
     }
 
@@ -81,10 +85,12 @@ export class PKPManager {
         signer: any,
         litActionIpfsCid: string,
         rpcUrl?: string
-    ) {
+    ): Promise<PKPMintResult> {
         try {
             const { LitContracts } = await import('@lit-protocol/contracts-sdk');
             const { LitNetwork } = await import('@lit-protocol/constants');
+            // Using require/import for Ethers 5 depending on environment (Lit SDK uses Ethers 5)
+            // Assuming environment has it or provided
             const ethers5 = await import('ethers5');
 
             const effectiveRpcUrl = rpcUrl || 'https://yellowstone-rpc.litprotocol.com';
@@ -120,10 +126,8 @@ export class PKPManager {
 
             const receipt = await tx.wait();
 
-            // Logic to parse logs and find TokenID (Simplified for SDK)
-            // Ideally we iterate logs similar to the original file
             let tokenId = "";
-            const nftInterface = new ethers5.utils.Interface([
+            const nftInterface = new ethers5.default.utils.Interface([
                 "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)"
             ]);
 
@@ -137,16 +141,20 @@ export class PKPManager {
             }
 
             if (!tokenId) {
+                // Try simpler lookup
+                const topics = receipt.logs[0].topics;
+                // Sometimes it's hard to parse generically without ABI, assuming failure if not found
                 throw new Error("Could not find PKP TokenId in transaction logs");
             }
 
             const publicKey = await litContracts.pubkeyRouterContract.read.getPubkey(tokenId);
-            const ethAddress = ethers5.utils.computeAddress(publicKey);
+            const ethAddress = ethers5.default.utils.computeAddress(publicKey);
 
             return {
                 tokenId,
                 publicKey,
                 ethAddress,
+                nearImplicitAccount: "",
                 txHash: receipt.transactionHash
             };
         } catch (e: any) {
@@ -158,7 +166,7 @@ export class PKPManager {
     async getPKPSessionSigs(
         pkpPublicKey: string,
         nearSignCallback: () => Promise<{ sig: string, msg: string, pk: string }>
-    ) {
+    ): Promise<SessionSigs> {
         const { sig, msg, pk } = await nearSignCallback();
 
         return this.litNodeClient.getPkpSessionSigs({

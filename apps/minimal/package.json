@@ -3,7 +3,7 @@
     "version": "0.1.0",
     "private": true,
     "scripts": {
-        "dev": "next dev --port 3001",
+        "dev": "next dev",
         "build": "next build",
         "start": "next start",
         "lint": "next lint"
@@ -13,7 +13,7 @@
         "react": "^18.0.0",
         "react-dom": "^18.0.0",
         "@youtick/sdk": "*",
-        "near-api-js": "^3.0.0",
+        "near-api-js": "^5.0.0",
         "ethers": "^6.0.0",
         "@near-wallet-selector/core": "^8.9.0",
         "@near-wallet-selector/my-near-wallet": "^8.9.0",

@@ -23,3 +23,7 @@ pnpm-debug.log*
 # Local Env
 .env*.local
 .env
+
+# Internal Proposal Docs
+FULL_PROPOSAL.md
+SUBMISSION_GUIDE.md

@@ -9,21 +9,13 @@ import {
 } from "@lit-protocol/auth-helpers";
 import { YouTickConfig, DEFAULT_CONFIG } from '../config';
 import { StorageInterface, MemoryStorage, SessionSigs, AuthSig, UnifiedAccessControlCondition } from '../types';
+import { ethers } from 'ethers';
 
-/**
- * Client for interacting with Lit Protocol.
- * Handles decentralized encryption, decryption, and signless session signature generation.
- */
 export class LitClient {
     private litNodeClient: LitNodeClient;
     private config: YouTickConfig;
     private storage: StorageInterface;
 
-    /**
-     * Initializes a new LitClient.
-     * @param config - YouTick configuration.
-     * @param storage - Custom storage for session tokens (defaults to localStorage or MemoryStorage).
-     */
     constructor(config: YouTickConfig = DEFAULT_CONFIG, storage?: StorageInterface) {
         this.config = config;
         this.storage = storage || (typeof window !== 'undefined' ? localStorage : new MemoryStorage());
@@ -35,24 +27,97 @@ export class LitClient {
         });
     }
 
-    /**
-     * Ensures the client is connected to the Lit network nodes.
-     */
     async connect(): Promise<void> {
         if (!this.litNodeClient.ready) {
             await this.litNodeClient.connect();
         }
     }
 
+    async getSessionSigs(
+        wallet: any,
+        accountId: string,
+        ethAddress: string,
+        signWithMPC: (wallet: any, accountId: string, path: string, message: string) => Promise<any>,
+        derivationPath: string = "lit/pkp-minting"
+    ): Promise<SessionSigs> {
+        await this.connect();
+
+        // Check cache logic here if needed (skipping for now as per web app "disabled cache" comment)
+
+        const resource = new LitAccessControlConditionResource('*');
+
+        const sessionSigs = await this.litNodeClient.getSessionSigs({
+            chain: 'ethereum',
+            expiration: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(), // 24 hours
+            resourceAbilityRequests: [
+                {
+                    resource: resource,
+                    ability: LitAbility.AccessControlConditionDecryption,
+                },
+                {
+                    resource: resource,
+                    ability: LitAbility.AccessControlConditionSigning,
+                },
+            ],
+            authNeededCallback: async ({ resourceAbilityRequests, expiration, uri }) => {
+                if (!uri || !expiration || !resourceAbilityRequests) {
+                    throw new Error("Missing required fields in authNeededCallback");
+                }
+
+                if (!ethAddress) {
+                    throw new Error("ethAddress is required");
+                }
+
+                const toSign = await createSiweMessageWithRecaps({
+                    uri,
+                    expiration,
+                    resources: resourceAbilityRequests,
+                    walletAddress: ethAddress,
+                    nonce: await this.litNodeClient.getLatestBlockhash(),
+                    litNodeClient: this.litNodeClient,
+                });
+
+                // Sign with MPC
+                const mpcSignature = await signWithMPC(wallet, accountId, derivationPath, toSign);
+
+                const r_val = '0x' + mpcSignature.big_r.affine_point.substring(2, 66);
+                const s_val = '0x' + mpcSignature.s.scalar;
+                let v_val = 27;
+                if (typeof mpcSignature.recovery_id === 'number') {
+                    v_val = mpcSignature.recovery_id + 27;
+                }
+                const signature = ethers.Signature.from({ r: r_val, s: s_val, v: v_val }).serialized;
+
+                // Verify and v-flip if necessary
+                let recoveredAddr = ethers.verifyMessage(toSign, signature);
+                let validSignature = signature;
+
+                if (recoveredAddr.toLowerCase() !== ethAddress.toLowerCase()) {
+                    const flippedV = v_val === 27 ? 28 : 27;
+                    const flippedSignature = ethers.Signature.from({ r: r_val, s: s_val, v: flippedV }).serialized;
+                    const recoveredFlipped = ethers.verifyMessage(toSign, flippedSignature);
+
+                    if (recoveredFlipped.toLowerCase() === ethAddress.toLowerCase()) {
+                        recoveredAddr = recoveredFlipped;
+                        validSignature = flippedSignature;
+                    }
+                }
+
+                return {
+                    sig: validSignature,
+                    derivedVia: "web3.eth.personal.sign",
+                    signedMessage: toSign,
+                    address: ethAddress,
+                };
+            },
+        });
+
+        return sessionSigs;
+    }
+
     /**
-     * Generates session signatures using a PKP (Programmable Key Pair).
-     * This enables a "signless" experience as the Lit Action verifies the user's 
-     * NEAR identity to authorize the PKP for signing.
-     * @param pkpPublicKey - The public key of the PKP.
-     * @param pkpEthAddress - The derived Ethereum address of the PKP.
-     * @param nearAccountId - The user's NEAR account ID.
-     * @param capacityDelegationAuthSig - Optional signature for capacity delegation (rate limiting).
-     * @returns Session signatures for use in encryption/decryption.
+     * Get session signatures using a PKP (signless experience).
+     * Uses Lit Action to verify NEAR signature and authorize the PKP.
      */
     async getSessionSigsWithPKP(
         pkpPublicKey: string,
@@ -62,7 +127,7 @@ export class LitClient {
     ): Promise<SessionSigs> {
         await this.connect();
 
-        const litActionIpfsCid = this.config.litActionIpfsId || "Qmc6cLer2fmtuzNFhdtBoZvM1gCzX9s8gbc8wzWdizeuJe";
+        const litActionIpfsCid = this.config.litActionIpfsId || "QmZhqF9xZAJTTRyUR4d5L1zt83MByXaXUQuaU3a7gKdsh6";
 
         const sessionParams: any = {
             pkpPublicKey,
@@ -95,15 +160,6 @@ export class LitClient {
         return sessionSigs;
     }
 
-    /**
-     * Encrypts a file or data item with specified access control conditions.
-     * @param file - The data to encrypt.
-     * @param accessControlConditions - Conditions required for decryption (e.g. NFT ownership).
-     * @param authSig - Standard SIWE AuthSig.
-     * @param chain - Target chain for access control (default: 'ethereum').
-     * @param sessionSigs - Signless session signatures (alternative to authSig).
-     * @returns Object containing ciphertext and data hash.
-     */
     async encryptFile(
         file: File | Blob,
         accessControlConditions: UnifiedAccessControlCondition[],
@@ -130,16 +186,6 @@ export class LitClient {
         return await encryptFile(params, this.litNodeClient);
     }
 
-    /**
-     * Decrypts ciphertext back to the original data format.
-     * @param ciphertext - The encrypted data.
-     * @param dataToEncryptHash - Hash of the original data.
-     * @param accessControlConditions - Conditions to verify.
-     * @param authSig - Standard SIWE AuthSig.
-     * @param chain - Target chain.
-     * @param sessionSigs - Signless session signatures.
-     * @returns Decrypted data as Uint8Array.
-     */
     async decryptFile(
         ciphertext: string,
         dataToEncryptHash: string,
@@ -168,9 +214,6 @@ export class LitClient {
         return await decryptToFile(params, this.litNodeClient);
     }
 
-    /**
-     * Exposes the underlying LitNodeClient for advanced usage.
-     */
     get client(): LitNodeClient {
         return this.litNodeClient;
     }

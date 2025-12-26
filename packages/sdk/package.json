@@ -1,20 +1,52 @@
 {
     "name": "@youtick/sdk",
-    "version": "0.1.0",
-    "description": "YouTick Core SDK - Shared logic for Decentralized Video Platform",
+    "version": "1.0.0-rc.1",
+    "description": "YouTick Core SDK - Session Keys, Lit Protocol Encryption, and MPC Chain Signatures for NEAR",
     "main": "dist/index.js",
     "module": "dist/index.mjs",
     "types": "dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.mjs",
+            "require": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist",
+        "README.md",
+        "CHANGELOG.md"
+    ],
     "scripts": {
         "build": "tsup src/index.ts --format cjs,esm --dts",
         "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+        "test": "vitest run",
+        "test:watch": "vitest",
         "lint": "eslint src/"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/4rmus/youtick-core.git",
+        "directory": "packages/sdk"
+    },
+    "homepage": "https://github.com/4rmus/youtick-core/tree/main/packages/sdk#readme",
+    "bugs": {
+        "url": "https://github.com/4rmus/youtick-core/issues"
+    },
+    "publishConfig": {
+        "access": "public"
     },
     "keywords": [
         "near",
+        "near-protocol",
         "lit-protocol",
+        "session-keys",
+        "mpc",
+        "chain-signatures",
         "sdk",
-        "decentralized-media"
+        "decentralized-media",
+        "web3",
+        "blockchain"
     ],
     "author": "4rmus",
     "license": "MIT",
@@ -26,9 +58,10 @@
         "@lit-protocol/types": "^7.0.0",
         "@lit-protocol/contracts-sdk": "^7.0.0",
         "@lit-protocol/lit-auth-client": "^7.0.0",
+        "@lighthouse-web3/sdk": "^0.3.0",
         "ethers": "^6.0.0",
         "ethers5": "npm:ethers@5.7.2",
-        "near-api-js": "^3.0.0",
+        "near-api-js": "^6.5.1",
         "elliptic": "^6.5.4",
         "bn.js": "^5.2.1",
         "js-sha3": "^0.8.0"
@@ -36,7 +69,11 @@
     "devDependencies": {
         "tsup": "^8.0.0",
         "typescript": "^5.0.0",
+        "vitest": "^2.0.0",
         "@types/elliptic": "^6.4.14",
         "@types/bn.js": "^5.1.1"
+    },
+    "engines": {
+        "node": ">=18.0.0"
     }
 }
